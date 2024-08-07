@@ -21,6 +21,7 @@ struct {
 #ifndef lock_xadd
 #define lock_xadd(ptr, val)	((void) __sync_fetch_and_add(ptr, val))
 #endif
+struct datarec tmp;
 
 SEC("xdp")
 int  xdp_stats1_func(struct xdp_md *ctx)
@@ -29,15 +30,20 @@ int  xdp_stats1_func(struct xdp_md *ctx)
 	// void *data     = (void *)(long)ctx->data;
 	struct datarec *rec;
 	__u32 key = XDP_PASS; /* XDP_PASS = 2 */
-
+	__u32 key1 = XDP_ABORTED;
 	/* Lookup in kernel BPF-side return pointer to actual data record */
 	rec = bpf_map_lookup_elem(&xdp_stats_map, &key);
 	/* BPF kernel-side verifier will reject program if the NULL pointer
 	 * check isn't performed here. Even-though this is a static array where
 	 * we know key lookup XDP_PASS always will succeed.
 	 */
-	if (!rec)
+	if (!rec){
+		tmp.rx_bytes = 100000;
+		tmp.rx_packets = 100000;
+		rec = &tmp;
+		bpf_map_update_elem(&xdp_stats_map, &key1, rec, BPF_ANY);
 		return XDP_ABORTED;
+	}
 
 	/* Multiple CPUs can access data record. Thus, the accounting needs to
 	 * use an atomic operation.
@@ -49,7 +55,11 @@ int  xdp_stats1_func(struct xdp_md *ctx)
          * Assignment#3: Avoid the atomic operation
          * - Hint there is a map type named BPF_MAP_TYPE_PERCPU_ARRAY
          */
-
+	void *data_end = (void *)(long)ctx->data_end;	
+	void *data = (void *)(long)ctx->data;
+	__u64 bytes = data_end - data;
+	lock_xadd(&rec->rx_bytes, bytes);
+	bpf_map_update_elem(&xdp_stats_map, &key, rec, BPF_ANY);
 	return XDP_PASS;
 }
 
