@@ -18,10 +18,16 @@ static const char *__doc__ = "XDP loader and stats program\n"
 
 #include <net/if.h>
 #include <linux/if_link.h> /* depend on kernel-headers installed */
+#include <signal.h>
 
 #include "../common/common_params.h"
 #include "../common/common_user_bpf_xdp.h"
 #include "common_kern_user.h"
+
+static volatile sig_atomic_t exiting = 0;
+static void sig_int(int signo) {
+    exiting = 1;
+}
 
 static const char *default_filename = "xdp_prog_kern.o";
 static const char *default_progname = "xdp_stats1_func";
@@ -97,7 +103,7 @@ struct record {
 };
 
 struct stats_record {
-	struct record stats[1]; /* Assignment#2: Hint */
+	struct record stats[5]; /* Assignment#2: Hint */
 };
 
 static double calc_period(struct record *r, struct record *p)
@@ -112,31 +118,42 @@ static double calc_period(struct record *r, struct record *p)
 	return period_;
 }
 
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 static void stats_print(struct stats_record *stats_rec,
 			struct stats_record *stats_prev)
 {
+	const char* xdp_actions[] = {
+        "XDP_ABORTED",
+        "XDP_DROP",
+        "XDP_PASS",
+        "XDP_TX",
+        "XDP_REDIRECT"
+    };
 	struct record *rec, *prev;
 	double period;
 	__u64 packets;
+	__u64 bytes;
 	double pps; /* packets per sec */
 
 	/* Assignment#2: Print other XDP actions stats  */
+	for (int i = 0; i < 5; i ++)
 	{
-		char *fmt = "%-12s %'11lld pkts (%'10.0f pps)"
-			//" %'11lld Kbytes (%'6.0f Mbits/s)"
+		char *fmt = "%lld %'11lld pkts (%'10.0f pps)"
+			"%'11lld Kbytes (%'6.0f bits/s)"
 			" period:%f\n";
-		const char *action = action2str(XDP_PASS);
-		rec  = &stats_rec->stats[0];
-		prev = &stats_prev->stats[0];
+		rec  = &stats_rec->stats[i];
+		prev = &stats_prev->stats[i];
 
 		period = calc_period(rec, prev);
 		if (period == 0)
 		       return;
-
+		
 		packets = rec->total.rx_packets - prev->total.rx_packets;
 		pps     = packets / period;
-
-		printf(fmt, action, rec->total.rx_packets, pps, period);
+		bytes = (rec->total.rx_bytes - prev->total.rx_bytes);
+		printf("%s: \n", xdp_actions[i]);
+		printf(fmt, rec->total.rx_packets, rec->total.rx_packets, pps, bytes, period);
+		printf("\n");
 	}
 }
 
@@ -144,6 +161,7 @@ static void stats_print(struct stats_record *stats_rec,
 void map_get_value_array(int fd, __u32 key, struct datarec *value)
 {
 	if ((bpf_map_lookup_elem(fd, &key, value)) != 0) {
+		value->rx_packets = -1;
 		fprintf(stderr,
 			"ERR: bpf_map_lookup_elem failed key:0x%X\n", key);
 	}
@@ -156,7 +174,26 @@ void map_get_value_percpu_array(int fd, __u32 key, struct datarec *value)
 	// unsigned int nr_cpus = libbpf_num_possible_cpus();
 	// struct datarec values[nr_cpus];
 
-	fprintf(stderr, "ERR: %s() not impl. see assignment#3", __func__);
+	/* For percpu maps, user space gets a value per possible CPU */
+	unsigned int nr_cpus = libbpf_num_possible_cpus();
+	struct datarec values[nr_cpus];
+	__u64 sum_bytes = 0;
+	__u64 sum_pkts = 0;
+	int i;
+
+	if ((bpf_map_lookup_elem(fd, &key, values)) != 0) {
+		fprintf(stderr,
+			"ERR: bpf_map_lookup_elem failed key:0x%X\n", key);
+		return;
+	}
+
+	/* Sum values from each CPU */
+	for (i = 0; i < nr_cpus; i++) {
+		sum_pkts  += values[i].rx_packets;
+		sum_bytes += values[i].rx_bytes;
+	}
+	value->rx_packets = sum_pkts;
+	value->rx_bytes   = sum_bytes;
 }
 
 static bool map_collect(int fd, __u32 map_type, __u32 key, struct record *rec)
@@ -180,6 +217,7 @@ static bool map_collect(int fd, __u32 map_type, __u32 key, struct record *rec)
 	}
 
 	/* Assignment#1: Add byte counters */
+	rec->total.rx_bytes = value.rx_bytes;
 	rec->total.rx_packets = value.rx_packets;
 	return true;
 }
@@ -188,12 +226,19 @@ static void stats_collect(int map_fd, __u32 map_type,
 			  struct stats_record *stats_rec)
 {
 	/* Assignment#2: Collect other XDP actions stats  */
-	__u32 key = XDP_PASS;
-
+	__u32 key = XDP_ABORTED;
+	__u32 key2 = XDP_DROP;
+	__u32 key3 = XDP_PASS;
+	__u32 key4 = XDP_TX;
+	__u32 key5 = XDP_REDIRECT;
 	map_collect(map_fd, map_type, key, &stats_rec->stats[0]);
+	map_collect(map_fd, map_type, key2, &stats_rec->stats[1]);
+	map_collect(map_fd, map_type, key3, &stats_rec->stats[2]);
+	map_collect(map_fd, map_type, key4, &stats_rec->stats[3]);
+	map_collect(map_fd, map_type, key5, &stats_rec->stats[4]);
 }
 
-static void stats_poll(int map_fd, __u32 map_type, int interval)
+static void stats_poll(int map_fd, __u32 map_type, int interval, struct config *cfg)
 {
 	struct stats_record prev, record = { 0 };
 
@@ -210,12 +255,23 @@ static void stats_poll(int map_fd, __u32 map_type, int interval)
 	stats_collect(map_fd, map_type, &record);
 	usleep(1000000/4);
 
-	while (1) {
+	while (exiting == 0) {
 		prev = record; /* struct copy */
 		stats_collect(map_fd, map_type, &record);
 		stats_print(&record, &prev);
 		sleep(interval);
 	}
+	char errmsg[1024];
+	int err;
+
+	cfg->unload_all = true;
+	err = do_unload(cfg);
+	if (err) {
+		libxdp_strerror(err, errmsg, sizeof(errmsg));
+		fprintf(stderr, "Couldn't unload XDP program %d: %s\n",
+			(*cfg).prog_id, errmsg);
+	}
+	printf("Success: Unloading XDP prog name: %s\n", (*cfg).progname);
 }
 
 /* Lesson#4: It is userspace responsibility to known what map it is reading and
@@ -269,6 +325,10 @@ static int __check_map_fd_info(int map_fd, struct bpf_map_info *info,
 
 int main(int argc, char **argv)
 {
+	if (signal(SIGINT, sig_int) == SIG_ERR) {
+       return 1;
+    }
+
 	struct bpf_map_info map_expect = { 0 };
 	struct bpf_map_info info = { 0 };
 	struct xdp_program *program;
@@ -346,6 +406,6 @@ int main(int argc, char **argv)
 		       );
 	}
 
-	stats_poll(stats_map_fd, info.type, interval);
+	stats_poll(stats_map_fd, info.type, interval, &cfg);
 	return EXIT_OK;
 }
