@@ -36,7 +36,7 @@ static __always_inline int parse_ethhdr(struct hdr_cursor *nh,
 	/* Byte-count bounds check; check if current pointer + size of header
 	 * is after data_end.
 	 */
-	if (nh->pos + 1 > data_end)
+	if (nh->pos + hdrsize > data_end)
 		return -1;
 
 	nh->pos += hdrsize;
@@ -46,18 +46,38 @@ static __always_inline int parse_ethhdr(struct hdr_cursor *nh,
 }
 
 /* Assignment 2: Implement and use this */
-/*static __always_inline int parse_ip6hdr(struct hdr_cursor *nh,
+static __always_inline int parse_ip6hdr(struct hdr_cursor *nh,
 					void *data_end,
 					struct ipv6hdr **ip6hdr)
 {
-}*/
+	struct ipv6hdr *ip6h = nh->pos;
+	int hdrsize = sizeof(*ip6h);
+
+	if (nh->pos + hdrsize > data_end)
+		return -1;
+
+	nh->pos += hdrsize;
+	*ip6hdr = ip6h;
+
+	return ip6h->nexthdr;
+}
 
 /* Assignment 3: Implement and use this */
-/*static __always_inline int parse_icmp6hdr(struct hdr_cursor *nh,
+static __always_inline int parse_icmp6hdr(struct hdr_cursor *nh,
 					  void *data_end,
 					  struct icmp6hdr **icmp6hdr)
 {
-}*/
+	struct icmp6hdr *icmp6h = nh->pos;
+	int hdrsize = sizeof(*icmp6h);
+
+	if (nh->pos + hdrsize > data_end)
+		return -1;
+
+	nh->pos += hdrsize;
+	*icmp6hdr = icmp6h;
+
+	return icmp6h->icmp6_code;
+}
 
 SEC("xdp")
 int  xdp_parser_func(struct xdp_md *ctx)
@@ -65,7 +85,7 @@ int  xdp_parser_func(struct xdp_md *ctx)
 	void *data_end = (void *)(long)ctx->data_end;
 	void *data = (void *)(long)ctx->data;
 	struct ethhdr *eth;
-
+	struct icmp6hdr *icmp6h;
 	/* Default action XDP_PASS, imply everything we couldn't parse, or that
 	 * we don't want to deal with, we just pass up the stack and let the
 	 * kernel deal with it.
@@ -88,7 +108,11 @@ int  xdp_parser_func(struct xdp_md *ctx)
 		goto out;
 
 	/* Assignment additions go below here */
-
+	struct ipv6hdr *ipv6h;
+	parse_ip6hdr(&nh, data_end, &ipv6h);
+	if (ipv6h->nexthdr != IPPROTO_ICMPV6)
+        goto out; //
+	parse_icmp6hdr(&nh, data_end, &icmp6h);
 	action = XDP_DROP;
 out:
 	return xdp_stats_record_action(ctx, action); /* read via xdp_stats */
