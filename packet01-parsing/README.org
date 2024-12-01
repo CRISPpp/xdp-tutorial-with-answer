@@ -178,7 +178,7 @@ definitions we will be using in this lesson are the following:
 Since the packet data comes straight off the wire, the data fields will be
 in network byte order. Use the =bpf_ntohs()= and =bpf_htons()= functions to
 convert to and from host byte order, respectively. See the comment at the
-top of [[file:../headers/bpf_endian.h]] for why the =bpf_=-prefixed versions are
+top of [[https://github.com/libbpf/libbpf/blob/fbd60dbff51c870f5e80a17c4f2fd639eb80af90/src/bpf_endian.h][bpf_endian.h]] for why the =bpf_=-prefixed versions are
 needed.
 
 ** Function inlining and loop unrolling
@@ -188,11 +188,16 @@ functions need to be inlined into the main function. The =__always_inline=
 marker on the function definition ensures this, overriding any inlining
 decisions the compiler would otherwise make.
 
-Similarly, because eBPF does not support looping, we need to unroll any
+Before
+[[https://github.com/torvalds/linux/commit/2589726d12a1b12eaaa93c7f1ea64287e383c7a5][v5.3]],
+because eBPF did not support looping, we needed to unroll any
 loops in the program. This can be done by adding the =#pragma unroll=
 statement on the line before the loop, and only works with loops where the
 number of iterations are known at compile time (such as for loops with a
-static counter).
+static counter). Since v5.3 the verifier can determine if a loop will stop or
+not. A number of additional loop helpers have been implemented since then. The
+details can be accessed from the
+[[https://docs.ebpf.io/linux/concepts/loops/][eBPF Docs]].
 
 * Assignments
 
